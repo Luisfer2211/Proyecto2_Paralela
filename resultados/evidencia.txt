@@ -1,0 +1,46 @@
+============================================================
+ EVIDENCIA DE EJECUCION  -  Wed Oct 14 06:54:38 CST 2026
+============================================================
+
+### Vectores de prueba DES ###
+[PASS] vector1 cifrado  esperado=85E813540F0AB405  obtenido=85E813540F0AB405
+[PASS] vector1 descifrado  esperado=0123456789ABCDEF  obtenido=0123456789ABCDEF
+[PASS] vector2 cifrado  esperado=8CA64DE9C1B123A7  obtenido=8CA64DE9C1B123A7
+[PASS] vector2 descifrado  esperado=0000000000000000  obtenido=0000000000000000
+[PASS] round-trip  esperado=DEADBEEFCAFEBABE  obtenido=DEADBEEFCAFEBABE
+[PASS] ecb_crypt round-trip (16 bytes)
+
+== Resultado: TODOS LOS VECTORES PASARON ==
+
+### Parte B1: cifrar/descifrar con llave 42 ###
+Cifrado OK: '/mnt/c/Users/lpala/Documents/Paralela/Proyecto2_Paralela/entrada_bench.txt' (32 bytes) -> '/mnt/c/Users/lpala/Documents/Paralela/Proyecto2_Paralela/resultados/demo42.bin' (32 bytes) con llave 42.
+Descifrado OK: '/mnt/c/Users/lpala/Documents/Paralela/Proyecto2_Paralela/resultados/demo42.bin' -> '/mnt/c/Users/lpala/Documents/Paralela/Proyecto2_Paralela/resultados/demo42.txt' con llave 42.
+Texto recuperado: "Esta es una prueba de proyecto 2"
+
+### Una corrida de cada buscador (np=4, cota=1048576, llave media) ###
+Busqueda SECUENCIAL  archivo='/mnt/c/Users/lpala/Documents/Paralela/Proyecto2_Paralela/resultados/demo_media.bin'  frase="es una prueba de"  rango=[0, 1048576)
+LLAVE ENCONTRADA: 655360
+  archivo cifrado : /mnt/c/Users/lpala/Documents/Paralela/Proyecto2_Paralela/resultados/demo_media.bin
+  frase clave     : "es una prueba de"
+  texto descifrado: "Esta es una prueba de proyecto 2"
+Tiempo: 6.148420 s
+[naive] LLAVE ENCONTRADA: 655360   procesos=4   tiempo=1.538342 s
+  archivo cifrado : /mnt/c/Users/lpala/Documents/Paralela/Proyecto2_Paralela/resultados/demo_media.bin
+  frase clave     : "es una prueba de"
+  texto descifrado: "Esta es una prueba de proyecto 2"
+[ciclico] LLAVE ENCONTRADA: 655360   procesos=4   tiempo=1.938468 s
+  archivo cifrado : /mnt/c/Users/lpala/Documents/Paralela/Proyecto2_Paralela/resultados/demo_media.bin
+  frase clave     : "es una prueba de"
+  texto descifrado: "Esta es una prueba de proyecto 2"
+[maestro_trabajador] LLAVE ENCONTRADA: 655360   procesos=4   tiempo=3.115595 s
+  archivo cifrado : /mnt/c/Users/lpala/Documents/Paralela/Proyecto2_Paralela/resultados/demo_media.bin
+  frase clave     : "es una prueba de"
+  texto descifrado: "Esta es una prueba de proyecto 2"
+[aleatorio] LLAVE ENCONTRADA: 655360   procesos=4   tiempo=1.117626 s
+  archivo cifrado : /mnt/c/Users/lpala/Documents/Paralela/Proyecto2_Paralela/resultados/demo_media.bin
+  frase clave     : "es una prueba de"
+  texto descifrado: "Esta es una prueba de proyecto 2"
+[hibrido(4 hilos/proc)] LLAVE ENCONTRADA: 655360   procesos=2   tiempo=1.836574 s
+  archivo cifrado : /mnt/c/Users/lpala/Documents/Paralela/Proyecto2_Paralela/resultados/demo_media.bin
+  frase clave     : "es una prueba de"
+  texto descifrado: "Esta es una prueba de proyecto 2"

@@ -22,3 +22,8 @@ reporte/*.lot
 # Temporales
 _*.txt
 *.tmp
+resultados/*.log
+
+# PDFs de referencia (entradas, no entregables)
+Proyecto 2 - *.pdf
+reporte_lab12.pdf

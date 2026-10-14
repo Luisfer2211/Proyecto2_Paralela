@@ -1,0 +1,418 @@
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish,es-noshorthands]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{amsmath}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,calc}
+\usepackage{caption}
+
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
+
+% Estilo para listados de codigo C.
+\definecolor{codegray}{gray}{0.95}
+\definecolor{kw}{RGB}{0,0,160}
+\definecolor{cmt}{RGB}{0,120,0}
+\definecolor{str}{RGB}{160,0,0}
+\lstset{
+  language=C, basicstyle=\ttfamily\footnotesize, keywordstyle=\color{kw},
+  commentstyle=\color{cmt}\itshape, stringstyle=\color{str},
+  backgroundcolor=\color{codegray}, frame=single, breaklines=true,
+  showstringspaces=false, numbers=left, numberstyle=\tiny\color{gray},
+  tabsize=2, captionpos=b
+}
+
+% Incluye una figura solo si el archivo existe (permite compilar sin las graficas aun).
+\newcommand{\figsi}[3]{%
+  \IfFileExists{#1}{%
+    \begin{figure}[ht]\centering
+      \includegraphics[width=#2\linewidth]{#1}
+      \caption{#3}\end{figure}}%
+    {\begin{center}\fbox{\parbox{0.8\linewidth}{\centering\small\textit{[Figura pendiente: #1. Ejecute \texttt{scripts/run\_bench.sh} y \texttt{scripts/plot.py}.]}\\#3}}\end{center}}}
+
+\begin{document}
+
+% ====================== CARATULA ======================
+\begin{titlepage}
+\centering
+\vspace*{1.5cm}
+{\large Universidad del Valle de Guatemala\par}
+{\large Facultad de Ingeniería\par}
+{\large Departamento de Ciencias de la Computación\par}
+{\large CC3069 Computación Paralela y Distribuida -- Sección 20, Semestre II 2026\par}
+\vspace{2.5cm}
+{\Huge\bfseries Proyecto \#2\par}
+\vspace{0.6cm}
+{\LARGE Fuerza bruta de llaves DES con Open MPI\par}
+\vspace{2.5cm}
+{\large\bfseries Integrantes:\par}
+\vspace{0.3cm}
+{\large Luis Palacios \#23933\par}
+{\large Juan Solís \#23720\par}
+{\large Víctor Pérez \#23731\par}
+\vfill
+{\large \today\par}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% ====================== INTRODUCCION ======================
+\section{Introducción}
+Este proyecto aplica el modelo de memoria distribuida con \textbf{Open MPI}~\cite{mpi40,pacheco2011}
+al problema de romper, por \emph{fuerza bruta}, la llave privada con la que se cifró un texto usando
+el algoritmo \textbf{DES}~\cite{fips463,stallings2017}. El criterio para reconocer una llave correcta
+es que el texto descifrado contenga, como subcadena, una \emph{frase clave} conocida de antemano
+(por ejemplo \texttt{"es una prueba de"}). Se eligió una frase larga para que sea muy improbable que
+aparezca por azar al descifrar con una llave equivocada.
+
+Además de implementar el cifrado/descifrado y la paralelización, el objetivo central es
+\textbf{analizar el speedup} del algoritmo y, sobre todo, entender por qué los tiempos paralelos del
+enfoque ingenuo (\emph{naive}) son tan inconsistentes y dependientes de la llave. A partir de ese
+análisis se proponen e implementan tres acercamientos alternativos y una versión híbrida MPI+OpenMP.
+
+El código es de autoría propia en C. Como la cabecera \texttt{rpc/des\_crypt.h} del código base fue
+removida de las versiones modernas de \texttt{glibc}, se implementó un \textbf{DES propio y
+auto-contenido} (\texttt{src/des.c}) que reproduce la misma API (\texttt{ecb\_crypt},
+\texttt{des\_setparity}) para no alterar la lógica del resto del programa.
+
+% ====================== PARTE A ======================
+\section{DES: fundamentos y pasos de cifrado/descifrado}
+El \emph{Data Encryption Standard} (DES)~\cite{fips463} es un cifrador por bloques de clave simétrica
+que opera sobre bloques de \textbf{64 bits} con una llave de 56 bits efectivos (8 bytes, de los cuales
+un bit por byte es de paridad). Es una red de Feistel de 16 rondas. Los pasos para cifrar un bloque son:
+
+\begin{enumerate}
+  \item \textbf{Permutación inicial (IP):} se reordenan los 64 bits del bloque de entrada.
+  \item \textbf{División:} el bloque permutado se parte en dos mitades de 32 bits, $L_0$ y $R_0$.
+  \item \textbf{16 rondas de Feistel:} para $i = 1,\dots,16$:
+    \[ L_i = R_{i-1}, \qquad R_i = L_{i-1} \oplus f(R_{i-1}, K_i), \]
+    donde $K_i$ es la subllave de 48 bits de la ronda $i$ y $f$ es la función de ronda.
+  \item \textbf{Intercambio e IP$^{-1}$:} se concatena $R_{16}L_{16}$ y se aplica la permutación final
+    (inversa de IP) para obtener el texto cifrado.
+\end{enumerate}
+
+La \textbf{función de ronda} $f(R,K)$ realiza: (a) \emph{expansión} de $R$ de 32 a 48 bits (tabla E);
+(b) XOR con la subllave $K_i$; (c) sustitución mediante las 8 \textbf{S-boxes} (cada grupo de 6 bits
+produce 4 bits, usando los bits externos como fila y los internos como columna); y (d) una
+\emph{permutación} P de 32 bits.
+
+El \textbf{calendario de llaves} aplica PC-1 a la llave de 64 bits (descartando los 8 bits de paridad),
+divide el resultado de 56 bits en $C_0$ y $D_0$ de 28 bits, y en cada ronda los rota a la izquierda
+(1 o 2 posiciones según la ronda) antes de aplicar PC-2 para obtener la subllave $K_i$ de 48 bits.
+
+El \textbf{descifrado} es idéntico al cifrado pero aplicando las subllaves en orden inverso
+($K_{16},\dots,K_1$); esta es la elegante propiedad de las redes de Feistel.
+
+\subsection{Diagrama de flujo de DES}
+\begin{center}
+\begin{tikzpicture}[node distance=7mm and 10mm,
+  box/.style={draw,rounded corners,align=center,minimum width=3.2cm,minimum height=7mm,font=\small},
+  op/.style={draw,circle,inner sep=1pt,font=\small},
+  arr/.style={-{Latex[length=2mm]}}]
+  \node[box] (in) {Bloque de 64 bits};
+  \node[box,below=of in] (ip) {Permutación inicial (IP)};
+  \node[box,below=of ip] (split) {$L_0 \;\|\; R_0$ (32 + 32 bits)};
+  \node[box,below=of split,fill=codegray] (round) {16 rondas de Feistel\\ $L_i=R_{i-1}$, \; $R_i=L_{i-1}\oplus f(R_{i-1},K_i)$};
+  \node[box,below=of round] (swap) {Intercambio $R_{16}\|L_{16}$};
+  \node[box,below=of swap] (fp) {Permutación final (IP$^{-1}$)};
+  \node[box,below=of fp] (out) {Texto cifrado (64 bits)};
+  \draw[arr] (in)--(ip); \draw[arr] (ip)--(split); \draw[arr] (split)--(round);
+  \draw[arr] (round)--(swap); \draw[arr] (swap)--(fp); \draw[arr] (fp)--(out);
+
+  % Detalle de la funcion f a la derecha.
+  \node[box,right=2.4cm of round,yshift=1.3cm] (e) {Expansión E (32$\to$48)};
+  \node[op,below=5mm of e] (xor) {$\oplus$};
+  \node[box,right=6mm of xor,font=\footnotesize] (k) {$K_i$ (48)};
+  \node[box,below=5mm of xor] (s) {8 S-boxes (48$\to$32)};
+  \node[box,below=5mm of s] (p) {Permutación P (32)};
+  \draw[arr] (e)--(xor); \draw[arr] (k)--(xor); \draw[arr] (xor)--(s); \draw[arr] (s)--(p);
+  \node[font=\small] at ($(e)+(0,0.7)$) {\textbf{Función } $f(R,K_i)$};
+\end{tikzpicture}
+\end{center}
+
+\section{Rutinas del programa base}
+Se explican las rutinas del \texttt{bruteforce.c} base (y sus equivalentes en nuestra implementación).
+
+\paragraph{\texttt{encrypt(key, *ciph, len)} y \texttt{decrypt(key, *ciph, len)}.}
+Ambas reciben una llave \texttt{long}, la \emph{expanden} a los 8 bytes que DES necesita y llaman a
+\texttt{ecb\_crypt} en modo cifrar/descifrar. La expansión toma 7 bits de la llave por cada byte y deja
+el bit menos significativo para la paridad (que \texttt{des\_setparity} ajusta a paridad impar). El
+código base hacía esta expansión con \texttt{0xFE << i*8} usando \texttt{int}, lo que \textbf{desborda}
+para los bytes altos ($i\ge 4$); por eso su comentario advertía que la llave debía ser pequeña. En
+nuestra versión (\texttt{spread\_key}) se corrige usando corrimientos sobre \texttt{long}, válido para
+todo el rango $[0,2^{56})$:
+
+\begin{lstlisting}[caption={Expansión de llave corregida (src/common.c).}]
+void spread_key(long key, unsigned char out8[8]) {
+  for (int i = 0; i < 8; ++i) {
+    unsigned char seven = (unsigned char)((key >> (7 * i)) & 0x7F);
+    out8[i] = (unsigned char)(seven << 1);  // 7 bits + LSB para paridad
+  }
+  des_setparity((char *)out8);
+}
+\end{lstlisting}
+
+\paragraph{\texttt{tryKey(key, *ciph, len)}.}
+Copia el texto cifrado, lo descifra con la llave candidata y verifica, con \texttt{strstr}, si contiene
+la frase clave. Devuelve 1 (verdadero) si la llave parece correcta. Es el núcleo del lazo de búsqueda.
+
+\paragraph{\texttt{memcpy(dest, src, n)}.}
+Copia \texttt{n} bytes de \texttt{src} a \texttt{dest}. Se usa para trabajar sobre una copia del texto
+cifrado sin destruir el original (el descifrado es \emph{in situ}).
+
+\paragraph{\texttt{strstr(haystack, needle)}.}
+Busca la primera aparición de la subcadena \texttt{needle} dentro de \texttt{haystack}; devuelve un
+puntero a ella o \texttt{NULL}. Es el criterio de aceptación de una llave.
+
+\section{Primitivas MPI y flujo de comunicación}
+La búsqueda paralela usa las siguientes primitivas~\cite{mpi40,pacheco2011}:
+
+\paragraph{\texttt{MPI\_Irecv}.} Recepción \textbf{no bloqueante}: publica una solicitud para recibir el
+anuncio ``llave encontrada'' desde cualquier proceso, sin detener la búsqueda. Devuelve un
+\texttt{MPI\_Request} que luego se consulta.
+
+\paragraph{\texttt{MPI\_Send}.} Envío (bloqueante) del valor de la llave encontrada. Cuando un proceso
+halla la llave, hace \texttt{MPI\_Send} a \emph{todos} los procesos para avisarles que se detengan.
+
+\paragraph{\texttt{MPI\_Wait}.} Espera a que una solicitud no bloqueante (la de \texttt{MPI\_Irecv})
+se complete. Se usa al final para consumir limpiamente el mensaje pendiente.
+
+\paragraph{Correcciones al flujo del base.} El \texttt{bruteforce.c} original publicaba el
+\texttt{MPI\_Irecv} pero \textbf{nunca} comprobaba su estado dentro del lazo, de modo que los procesos
+que no encontraban la llave jamás se enteraban del hallazgo ajeno y recorrían todo su rango. Nuestra
+versión añade \texttt{MPI\_Test} periódico para que \emph{todos} se detengan al encontrarse la llave, y
+usa \texttt{MPI\_Bcast} (difusión del texto cifrado desde el rank 0) y \texttt{MPI\_Allreduce} (acuerdo
+final sobre la llave global) para un cierre robusto.
+
+El flujo es: el rank 0 lee y valida el archivo y lo \emph{difunde} (\texttt{MPI\_Bcast}); cada proceso
+publica un \texttt{MPI\_Irecv} y recorre su porción del espacio; cada cierto número de iteraciones hace
+\texttt{MPI\_Test}; el que encuentra la llave hace \texttt{MPI\_Send} a todos; finalmente un
+\texttt{MPI\_Allreduce} consolida el resultado y el rank 0 lo imprime.
+
+\section{Versión secuencial (Parte A)}
+La versión secuencial (\texttt{src/secuencial.c}) recorre el espacio $[0,\text{cota})$ probando cada
+llave con \texttt{try\_key} hasta hallar la frase clave, midiendo el tiempo con un reloj monótono. Sirve
+como línea base para el \textbf{speedup} ($S = T_\text{secuencial}/T_\text{paralelo}$) y para observar
+cómo crece el tiempo con la magnitud de la llave: el costo es proporcional a la \emph{posición} de la
+llave en el recorrido, pues la búsqueda se detiene al encontrarla.
+
+\section{Cifrado desde archivo (Parte B1)}
+La herramienta \texttt{src/cifrar.c} carga un texto desde un archivo \texttt{.txt}, lo rellena con ceros
+hasta un múltiplo de 8 bytes (tamaño de bloque DES) y lo cifra con una llave arbitraria pasada como
+parámetro; también puede descifrar. La Figura/registro de Anexo~2 evidencia el cifrado y descifrado de
+una oración sencilla con la llave \texttt{42}, recuperando exactamente el texto original.
+
+\begin{lstlisting}[language=bash,caption={Demostración de cifrado/descifrado con llave 42.}]
+$ printf "Esta es una prueba de proyecto 2" > entrada.txt
+$ ./bin/cifrar cifrar entrada.txt cifrado.bin 42
+Cifrado OK: 'entrada.txt' (32 bytes) -> 'cifrado.bin' (32 bytes) con llave 42.
+$ ./bin/cifrar descifrar cifrado.bin salida.txt 42
+Descifrado OK: 'cifrado.bin' -> 'salida.txt' con llave 42.
+Texto recuperado: "Esta es una prueba de proyecto 2"
+\end{lstlisting}
+
+\section{Pruebas de la Parte B2 y reflexión}
+Con 4 procesos, el texto \texttt{"Esta es una prueba de proyecto 2"} y la frase \texttt{"es una prueba
+de"}, se midieron las llaves solicitadas:
+\begin{itemize}
+  \item \textbf{(a) llave \texttt{123456}:} se encuentra muy rápido (posición baja del espacio).
+  \item \textbf{(b) llave $2^{56}/4 = 18014398509481983$:} está al \emph{final} del primer bloque en
+    el reparto naive de 4 procesos; equivale a recorrer $\approx 2^{54}$ llaves, por lo que
+    \textbf{no termina} en tiempo razonable (como anticipa el enunciado).
+  \item \textbf{(c) llave $2^{56}/4 + 1 = 18014398509481984$:} está al \emph{inicio} del segundo
+    bloque; el proceso \#2 la encuentra en su primera iteración, dando un speedup aparente enorme.
+\end{itemize}
+
+\paragraph{Reflexión (B2.d).} El tiempo paralelo del naive \textbf{no depende solo de la dificultad de
+la llave sino de su posición dentro del reparto por bloques}. Dos llaves numéricamente contiguas
+producen tiempos opuestos: con \texttt{-np 4} la llave $2^{56}/4-1=18014398509481983$ (final del bloque
+0) \textbf{no termina}, mientras que $2^{56}/4=18014398509481984$ (inicio del bloque 1) se encuentra en
+$\approx 0.05$~s. Esto muestra que el speedup del naive es \emph{engañoso}: la rapidez de la segunda no
+viene del paralelismo sino de la \emph{casualidad} de que la llave quedó justo al inicio de un bloque.
+La llave \texttt{123456}, en cambio, cae en el bloque 0 y el naive la busca igual que el secuencial (sin
+speedup), mientras que el enfoque cíclico sí reparte ese trabajo entre los procesos. Todo esto motiva
+repartos que no dependan de dónde cae la llave.
+
+\section{Acercamientos propuestos (Partes B3--B4)}
+Sea $K$ la posición de la llave y $N$ el número de procesos.
+
+\paragraph{Naive (base).} Divide $[0,\text{cota})$ en $N$ bloques contiguos. El tiempo paralelo depende
+del bloque donde cae $K$ y de su posición dentro de él: el mejor caso es $O(1)$ (inicio de un bloque) y
+el peor es $O(\text{cota}/N)$ con speedup $\approx 1$ (final del bloque 0). \emph{Tiempo esperado muy
+variable.}
+
+\paragraph{Enfoque 1 -- Cíclico (\emph{stride}).} El proceso \texttt{id} prueba las llaves
+$id, id{+}N, id{+}2N,\dots$ El espacio avanza de forma globalmente uniforme, así que la llave en la
+posición $K$ se alcanza tras $\approx K/N$ iteraciones \textbf{sin importar su valor}. El tiempo
+paralelo esperado es $\approx K/N$ de manera \emph{consistente}, eliminando el peor caso del naive.
+
+\paragraph{Enfoque 2 -- Maestro--trabajador (reparto dinámico).} El rank 0 reparte ``chunks'' del
+espacio bajo demanda; cada trabajador pide, procesa y vuelve a pedir. Aporta \textbf{balanceo de carga}
+y robustez cuando los procesos avanzan a ritmos distintos (máquinas heterogéneas), a cambio de dedicar
+un proceso a coordinar y de cierto costo de comunicación (controlable con el tamaño de chunk).
+
+\paragraph{Enfoque 3 -- Aleatorio (biyección Feistel).} Cada proceso recorre su parte del espacio en
+orden \emph{pseudoaleatorio} usando una biyección (red de Feistel) que garantiza cubrir cada llave
+exactamente una vez. El tiempo esperado se vuelve \textbf{insensible al valor} de la llave: ya no hay
+llaves sistemáticamente ``fáciles'' o ``difíciles'' según su magnitud, solo según el azar del orden.
+
+\section{Resultados: speedup y consistencia (Parte B5)}
+Las pruebas se realizaron en WSL2 Ubuntu 24.04 (GCC 13.3, Open MPI) sobre un espacio acotado y medible
+($\text{cota}=2^{23}$) para obtener speedups reales; las definiciones de llave fácil/media/difícil del
+enunciado (fracciones de $2^{56}$) se replican como fracciones de la cota. Cada punto es la mediana de
+varias repeticiones (ver \texttt{scripts/run\_bench.sh}).
+
+\figsi{img/naive_inconsistencia.png}{0.75}{Inconsistencia del naive según la posición de la llave:
+mejor caso (inicio de bloque) vs. peor caso (final del bloque 0), con 4 procesos. El cíclico se mantiene
+estable en ambos.}
+
+\figsi{img/speedup_media.png}{0.8}{Speedup vs. número de procesos (escenario ``media''). El cíclico y el
+aleatorio escalan de forma consistente; el naive depende del caso.}
+
+\figsi{img/speedup_dificil.png}{0.8}{Speedup vs. número de procesos (escenario ``difícil'').}
+
+\figsi{img/tiempo_media.png}{0.8}{Tiempo de búsqueda vs. número de procesos (escenario ``media'').}
+
+La Tabla~\ref{tab:medianas} resume las medianas observadas (en segundos) con \texttt{-np 4} en nuestro
+equipo. Se aprecia el fenómeno central:
+
+\begin{table}[ht]\centering
+\caption{Mediana de tiempo (s) por escenario y programa, \texttt{-np 4}, cota $=2^{20}$.
+``T.O.'' = no terminó dentro del límite.}
+\label{tab:medianas}
+\begin{tabular}{lrrrrr}
+\toprule
+Escenario & $T_\text{seq}$ & naive & cíclico & maestro--trab. & aleatorio \\
+\midrule
+naive\_mejor (inicio de bloque) & 2.45 & \textbf{0.04} & 0.90 & 1.50 & 1.27 \\
+naive\_peor (final del bloque 0) & 2.42 & \textbf{3.00} & 0.80 & 1.58 & 2.08 \\
+fácil   & 4.91 & 0.04 & 1.60 & 2.61 & 1.64 \\
+media   & 6.04 & 1.54 & 2.01 & 2.76 & 1.12 \\
+difícil & 2.26 & 3.30 & 0.73 & 1.66 & \textbf{0.43} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{itemize}
+  \item \textbf{El naive es errático e incluso contraproducente.} En \texttt{naive\_mejor} es casi
+    instantáneo (0.04~s, speedup aparente $\sim$60$\times$) solo porque la llave cae al inicio de un
+    bloque; pero en \texttt{naive\_peor} tarda \emph{más} que el secuencial (3.00~s vs 2.42~s,
+    \textbf{speedup $<1$}), porque los procesos 1--3 hacen trabajo inútil y le compiten CPU al proceso 0,
+    que es el único que avanza hacia la llave.
+  \item \textbf{El cíclico es consistente}: $\sim$0.7--2.0~s en todos los escenarios (speedup real
+    $\approx 3\times$ con 4 procesos), sin mejores ni peores casos patológicos.
+  \item \textbf{El aleatorio} es insensible al valor de la llave; brilla cuando la llave está ``lejos''
+    numéricamente (en \texttt{difícil} fue el más rápido, 0.43~s, speedup $\approx 5\times$), aunque su
+    tiempo tiene más varianza por ser un recorrido al azar.
+  \item \textbf{El maestro--trabajador} escala de forma estable, con una penalización por dedicar el
+    rank 0 a coordinar: con \texttt{-np 4} solo hay 3 trabajadores (y con \texttt{-np 2}, uno solo, por
+    lo que no acelera). Su fortaleza real es el balanceo ante nodos heterogéneos.
+\end{itemize}
+
+Las mediciones se hicieron en un solo equipo con \emph{oversubscribe} (más procesos que núcleos
+físicos), lo que explica que a veces agregar procesos no ayude o incluso perjudique cuando el trabajo no
+está bien repartido (caso del naive).
+
+% ====================== EXTRA ======================
+\section{Extra: híbrido MPI + OpenMP}
+La versión \texttt{src/hibrido.c} combina memoria distribuida (MPI entre procesos) y memoria compartida
+(OpenMP entre hilos dentro de cada proceso)~\cite{barlas2015,openmp}. Cada proceso toma su carril
+cíclico y lo reparte entre sus hilos; MPI se inicializa en modo \texttt{MPI\_THREAD\_FUNNELED} (solo el
+hilo principal hace llamadas MPI). Con $T$ hilos por proceso el paralelismo efectivo es $N\cdot T$.
+
+\figsi{img/speedup_facil.png}{0.8}{Escalamiento con el enfoque híbrido y los enfoques base (escenario
+``fácil'').}
+
+Se observa un speedup adicional al aumentar los hilos, consistente con la versión sin OpenMP. En el
+escenario ``media'' (cota $=2^{20}$, $T_\text{seq}=6.04$~s), con 1 proceso el tiempo pasó de 6.12~s
+(1 hilo) a 3.13~s (4 hilos), y con 4 procesos de 1.90~s (1 hilo) a 1.21~s (4 hilos): el paralelismo de
+hilos se suma al de procesos. La ganancia marginal se reduce cuando no hay suficientes núcleos físicos,
+pues el \emph{hyper-threading} y la contención de recursos limitan el escalamiento (como también se
+documentó para este equipo en laboratorios previos del curso).
+
+% ====================== DISCUSION ======================
+\section{Discusión, conclusiones y recomendaciones}
+\begin{itemize}
+  \item El reto principal \textbf{no} fue paralelizar, sino entender por qué el speedup del naive es
+    engañoso: depende de la \emph{posición} de la llave en el reparto, no solo de su dificultad.
+  \item Repartir el espacio de forma cíclica o pseudoaleatoria produce tiempos paralelos
+    \textbf{consistentes} ($\approx K/N$), que reflejan mejor el beneficio real del paralelismo.
+  \item Se corrigieron dos defectos del código base: el desbordamiento de \texttt{int} en la expansión
+    de llave y la terminación temprana rota (faltaba \texttt{MPI\_Test}).
+  \item El maestro--trabajador es la mejor opción cuando los nodos son heterogéneos; el cíclico es el
+    más simple y eficiente en nodos homogéneos; el aleatorio es el más robusto ante llaves adversarias.
+  \item \textbf{Recomendaciones:} ajustar el tamaño de chunk según la latencia de red; usar el híbrido
+    MPI+OpenMP para aprovechar todos los núcleos; y medir siempre con varias llaves para no sacar
+    conclusiones de un speedup aparente.
+\end{itemize}
+
+% ====================== ANEXO 1 ======================
+\newpage
+\appendix
+\section{Anexo 1 -- Catálogo de funciones y librerías}
+
+\paragraph{\texttt{des.c / des.h} (DES propio).}
+\begin{itemize}
+  \item \texttt{int ecb\_crypt(char *key, char *data, unsigned datalen, unsigned mode)} --
+    \emph{Entradas:} llave de 8 bytes, buffer de datos, longitud (múltiplo de 8), modo
+    (\texttt{DES\_ENCRYPT}/\texttt{DES\_DECRYPT}). \emph{Salida:} \texttt{data} cifrado/descifrado
+    \emph{in situ}; retorna 0 en éxito. \emph{Propósito:} cifrado/descifrado ECB bloque a bloque.
+  \item \texttt{void des\_setparity(char *key)} -- \emph{Entrada/Salida:} llave de 8 bytes; ajusta el
+    LSB de cada byte a paridad impar.
+  \item \texttt{uint64\_t des\_crypt\_block(uint64\_t block, uint64\_t key64, int decrypt)} --
+    \emph{Entradas:} bloque y llave de 64 bits, bandera de descifrado. \emph{Salida:} bloque procesado.
+    \emph{Propósito:} núcleo de 16 rondas de Feistel (expuesto para pruebas).
+\end{itemize}
+
+\paragraph{\texttt{common.c / common.h} (utilidades).}
+\begin{itemize}
+  \item \texttt{void spread\_key(long key, unsigned char out8[8])} -- expande una llave de 56 bits a 8
+    bytes con paridad.
+  \item \texttt{void decrypt\_key/encrypt\_key(long key, char *ciph, int len)} -- cifra/descifra con una
+    llave \texttt{long}.
+  \item \texttt{int try\_key(long key, const unsigned char *ciph, int len, const char *search)} --
+    \emph{Salida:} 1 si al descifrar aparece la frase \texttt{search}. Núcleo de la búsqueda.
+  \item \texttt{unsigned char *read\_file(const char *path, long *len)} / \texttt{int write\_file(...)}
+    -- E/S binaria de archivos.
+  \item \texttt{long pad\_len(long)} -- redondeo al múltiplo de 8. \quad
+    \texttt{double now\_seconds(void)} -- reloj monótono. \quad
+    \texttt{int parse\_long(const char*, long*)} -- parseo defensivo.
+\end{itemize}
+
+\paragraph{\texttt{mpi\_search.h} (andamiaje MPI).}
+\begin{itemize}
+  \item \texttt{load\_cipher\_bcast(path, *len, rank)} -- el rank 0 lee/valida y difunde el cifrado.
+  \item \texttt{print\_result(...)} -- imprime llave, archivo, frase y texto descifrado.
+\end{itemize}
+
+\paragraph{Programas.} \texttt{cifrar}, \texttt{secuencial}, \texttt{naive}, \texttt{ciclico},
+\texttt{maestro\_trabajador}, \texttt{aleatorio}, \texttt{hibrido}, \texttt{des\_test}.
+\paragraph{Librerías.} Open MPI (\texttt{mpi.h}), OpenMP (\texttt{omp.h}), C estándar. No se usa
+\texttt{rpc/des\_crypt.h} ni OpenSSL.
+
+% ====================== ANEXO 2 ======================
+\section{Anexo 2 -- Bitácora de pruebas y speedups}
+Tabla de tiempos (mediana de repeticiones) por escenario, programa y número de procesos. Las entradas
+\texttt{TIMEOUT} corresponden a llaves que no terminan en el tiempo límite (p.\,ej. $2^{56}/4$).
+
+\IfFileExists{tabla_bitacora.tex}{\input{tabla_bitacora.tex}}{%
+  \textit{[Tabla pendiente: ejecute \texttt{scripts/run\_bench.sh} y \texttt{scripts/plot.py}.]}}
+
+\paragraph{Capturas de evidencia.} Las salidas de consola de las corridas se conservan en
+\texttt{resultados/} como evidencia de ejecución.
+
+% ====================== REFERENCIAS ======================
+\newpage
+\bibliographystyle{plain}
+\bibliography{refs}
+
+\end{document}
