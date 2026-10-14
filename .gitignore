@@ -1,0 +1,24 @@
+# Binarios y objetos
+bin/
+*.o
+*.out
+*.bin
+
+# Artefactos de compilacion de LaTeX (se conserva reporte.pdf)
+reporte/*.aux
+reporte/*.log
+reporte/*.toc
+reporte/*.out
+reporte/*.bbl
+reporte/*.bcf
+reporte/*.blg
+reporte/*.run.xml
+reporte/*.fls
+reporte/*.fdb_latexmk
+reporte/*.synctex.gz
+reporte/*.lof
+reporte/*.lot
+
+# Temporales
+_*.txt
+*.tmp
