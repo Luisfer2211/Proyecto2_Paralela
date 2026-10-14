@@ -149,10 +149,9 @@ static uint32_t feistel(uint32_t R, uint64_t subkey) {
   return (uint32_t)permute(out, P, 32, 32);
 }
 
-uint64_t des_crypt_block(uint64_t block, uint64_t key64, int decrypt) {
-  uint64_t subkeys[16];
-  des_key_schedule(key64, subkeys);
-
+/* Procesa un bloque con el calendario de llaves YA calculado (evita recomputar
+ * las 16 subllaves por cada bloque, que es el caso del lazo de busqueda). */
+static uint64_t des_process_block(uint64_t block, const uint64_t subkeys[16], int decrypt) {
   uint64_t ip = permute(block, IP, 64, 64);
   uint32_t L = (uint32_t)((ip >> 32) & 0xFFFFFFFFu);
   uint32_t R = (uint32_t)(ip & 0xFFFFFFFFu);
@@ -167,6 +166,12 @@ uint64_t des_crypt_block(uint64_t block, uint64_t key64, int decrypt) {
   /* Intercambio final: preoutput = R16 L16. */
   uint64_t preoutput = ((uint64_t)R << 32) | (uint64_t)L;
   return permute(preoutput, FP, 64, 64);
+}
+
+uint64_t des_crypt_block(uint64_t block, uint64_t key64, int decrypt) {
+  uint64_t subkeys[16];
+  des_key_schedule(key64, subkeys);
+  return des_process_block(block, subkeys, decrypt);
 }
 
 /* --- Utilidades de conversion bytes <-> uint64 (byte 0 = MSB) --- */
@@ -184,9 +189,11 @@ int ecb_crypt(char *key, char *data, unsigned datalen, unsigned mode) {
   if (datalen % 8 != 0) return 2; /* ECB requiere multiplo de 8 */
   uint64_t key64 = bytes_to_u64((const unsigned char *)key);
   int decrypt = (mode & DES_DECRYPT) ? 1 : 0;
+  uint64_t subkeys[16];
+  des_key_schedule(key64, subkeys); /* una sola vez por llave */
   for (unsigned off = 0; off + 8 <= datalen; off += 8) {
     uint64_t block = bytes_to_u64((const unsigned char *)data + off);
-    uint64_t out = des_crypt_block(block, key64, decrypt);
+    uint64_t out = des_process_block(block, subkeys, decrypt);
     u64_to_bytes(out, (unsigned char *)data + off);
   }
   return DES_SUCCESS;
