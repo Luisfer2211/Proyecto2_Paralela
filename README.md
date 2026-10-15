@@ -1,7 +1,7 @@
 # Proyecto 2 — Fuerza bruta DES con Open MPI
 
 Curso: **CC3069 Computación Paralela y Distribuida** — Universidad del Valle de Guatemala.
-Integrantes: **Luis Palacios #23933**, **Juan Solís #23720**, **Víctor Pérez #23731**.
+Integrante: **Luis Palacios #23933**.
 
 Este proyecto encuentra, por **fuerza bruta** y con **Open MPI**, la llave privada **DES** usada para
 cifrar un texto. Se sabe que una llave es correcta porque el texto descifrado contiene una **frase clave**
